@@ -25,8 +25,6 @@
 #include <vector>
 #include <unordered_set>
 #include <string>
-#include "vk_layer_config.h"
-#include "vk_layer_logging.h"
 
 VK_DEFINE_NON_DISPATCHABLE_HANDLE(DISTINCT_NONDISPATCHABLE_PHONY_HANDLE)
 // The following line must match the vulkan_core.h condition guarding VK_DEFINE_NON_DISPATCHABLE_HANDLE
@@ -65,8 +63,6 @@ struct object_use_data {
     int writer_count;
 };
 
-struct layer_data;
-
 template <typename T>
 class counter {
     public:
@@ -75,7 +71,45 @@ class counter {
     std::unordered_map<T, object_use_data> uses;
     std::mutex counter_lock;
     std::condition_variable counter_condition;
-    void startWrite(debug_report_data *report_data, T object) {
+
+    // VkCommandBuffer needs check for implicit use of command pool
+    void StartWrite(VkCommandBuffer object, bool lockPool = true) {
+        if (lockPool) {
+            std::unique_lock<std::mutex> lock(command_pool_lock);
+            VkCommandPool pool = command_pool_map[object];
+            lock.unlock();
+            StartWrite(pool);
+        }
+        c_VkCommandBuffer.startWrite(object);
+    }
+    void FinishWrite(VkCommandBuffer object, bool lockPool = true) {
+        c_VkCommandBuffer.finishWrite(object);
+        if (lockPool) {
+            std::unique_lock<std::mutex> lock(command_pool_lock);
+            VkCommandPool pool = command_pool_map[object];
+            lock.unlock();
+            FinishWrite(pool);
+        }
+    }
+    void StartRead(VkCommandBuffer object) {
+        std::unique_lock<std::mutex> lock(command_pool_lock);
+        VkCommandPool pool = command_pool_map[object];
+        lock.unlock();
+        // We set up a read guard against the "Contents" counter to catch conflict vs. vkResetCommandPool and vkDestroyCommandPool
+        // while *not* establishing a read guard against the command pool counter itself to avoid false postives for
+        // non-externally sync'd command buffers
+        c_VkCommandPoolContents.StartRead(pool);
+        c_VkCommandBuffer.StartRead(object);
+    }
+    void FinishRead(VkCommandBuffer object) {
+        c_VkCommandBuffer.FinishRead(object);
+        std::unique_lock<std::mutex> lock(command_pool_lock);
+        VkCommandPool pool = command_pool_map[object];
+        lock.unlock();
+        c_VkCommandPoolContents.FinishRead(pool);
+    }
+
+    void StartWrite(T object) {
         if (object == VK_NULL_HANDLE) {
             return;
         }
@@ -150,7 +184,7 @@ class counter {
         }
     }
 
-    void finishWrite(T object) {
+    void FinishWrite(T object) {
         if (object == VK_NULL_HANDLE) {
             return;
         }
@@ -165,7 +199,7 @@ class counter {
         counter_condition.notify_all();
     }
 
-    void startRead(debug_report_data *report_data, T object) {
+    void StartRead(T object) {
         if (object == VK_NULL_HANDLE) {
             return;
         }
@@ -203,7 +237,7 @@ class counter {
             uses[object].reader_count += 1;
         }
     }
-    void finishRead(T object) {
+    void FinishRead(T object) {
         if (object == VK_NULL_HANDLE) {
             return;
         }
@@ -220,26 +254,17 @@ class counter {
         typeName = name;
         objectType = type;
     }
+
+
+
 };
 
-struct layer_data {
-    VkInstance instance;
 
-    debug_report_data *report_data;
-    std::vector<VkDebugReportCallbackEXT> logging_callback;
-    std::vector<VkDebugUtilsMessengerEXT> logging_messenger;
-    VkLayerDispatchTable *device_dispatch_table;
-    VkLayerInstanceDispatchTable *instance_dispatch_table;
-    std::unordered_set<std::string> device_extension_set;
+class ThreadSafety : public ValidationObject {
+public:
 
-    // The following are for keeping track of the temporary callbacks that can
-    // be used in vkCreateInstance and vkDestroyInstance:
-    uint32_t num_tmp_report_callbacks;
-    VkDebugReportCallbackCreateInfoEXT *tmp_report_create_infos;
-    VkDebugReportCallbackEXT *tmp_report_callbacks;
-    uint32_t num_tmp_debug_messengers;
-    VkDebugUtilsMessengerCreateInfoEXT *tmp_messenger_create_infos;
-    VkDebugUtilsMessengerEXT *tmp_debug_messengers;
+    std::mutex command_pool_lock;
+    std::unordered_map<VkCommandBuffer, VkCommandPool> command_pool_map;
 
     counter<VkCommandBuffer> c_VkCommandBuffer;
     counter<VkDevice> c_VkDevice;
@@ -287,15 +312,8 @@ struct layer_data {
     counter<uint64_t> c_uint64_t;
 #endif  // DISTINCT_NONDISPATCHABLE_HANDLES
 
-    layer_data()
-        : report_data(nullptr),
-          num_tmp_report_callbacks(0),
-          tmp_report_create_infos(nullptr),
-          tmp_report_callbacks(nullptr),
-          num_tmp_debug_messengers(0),
-          tmp_messenger_create_infos(nullptr),
-          tmp_debug_messengers(nullptr),
-          c_VkCommandBuffer("VkCommandBuffer", VK_DEBUG_REPORT_OBJECT_TYPE_COMMAND_BUFFER_EXT),
+    ThreadSafety()
+        : c_VkCommandBuffer("VkCommandBuffer", VK_DEBUG_REPORT_OBJECT_TYPE_COMMAND_BUFFER_EXT),
           c_VkDevice("VkDevice", VK_DEBUG_REPORT_OBJECT_TYPE_DEVICE_EXT),
           c_VkInstance("VkInstance", VK_DEBUG_REPORT_OBJECT_TYPE_INSTANCE_EXT),
           c_VkQueue("VkQueue", VK_DEBUG_REPORT_OBJECT_TYPE_QUEUE_EXT),
@@ -339,96 +357,60 @@ struct layer_data {
           c_uint64_t("NON_DISPATCHABLE_HANDLE", VK_DEBUG_REPORT_OBJECT_TYPE_UNKNOWN_EXT)
 #endif  // DISTINCT_NONDISPATCHABLE_HANDLES
               {};
+
+#include "thread_safety.h"
+
 };
 
-#define WRAPPER(type)                                                                                                 \
-    static void startWriteObject(struct layer_data *my_data, type object) {                                           \
-        my_data->c_##type.startWrite(my_data->report_data, object);                                                   \
-    }                                                                                                                 \
-    static void finishWriteObject(struct layer_data *my_data, type object) { my_data->c_##type.finishWrite(object); } \
-    static void startReadObject(struct layer_data *my_data, type object) {                                            \
-        my_data->c_##type.startRead(my_data->report_data, object);                                                    \
-    }                                                                                                                 \
-    static void finishReadObject(struct layer_data *my_data, type object) { my_data->c_##type.finishRead(object); }
+////////#define WRAPPER(type)                                                                                                 \
+////////    static void startWriteObject(struct layer_data *my_data, type object) {                                           \
+////////        my_data->c_##type.startWrite(my_data->report_data, object);                                                   \
+////////    }                                                                                                                 \
+////////    static void finishWriteObject(struct layer_data *my_data, type object) { my_data->c_##type.finishWrite(object); } \
+////////    static void startReadObject(struct layer_data *my_data, type object) {                                            \
+////////        my_data->c_##type.startRead(my_data->report_data, object);                                                    \
+////////    }                                                                                                                 \
+////////    static void finishReadObject(struct layer_data *my_data, type object) { my_data->c_##type.finishRead(object); }
+////////
+////////WRAPPER(VkDevice)
+////////WRAPPER(VkInstance)
+////////WRAPPER(VkQueue)
+////////#ifdef DISTINCT_NONDISPATCHABLE_HANDLES
+////////WRAPPER(VkBuffer)
+////////WRAPPER(VkBufferView)
+////////WRAPPER(VkCommandPool)
+////////WRAPPER(VkDescriptorPool)
+////////WRAPPER(VkDescriptorSet)
+////////WRAPPER(VkDescriptorSetLayout)
+////////WRAPPER(VkDeviceMemory)
+////////WRAPPER(VkEvent)
+////////WRAPPER(VkFence)
+////////WRAPPER(VkFramebuffer)
+////////WRAPPER(VkImage)
+////////WRAPPER(VkImageView)
+////////WRAPPER(VkPipeline)
+////////WRAPPER(VkPipelineCache)
+////////WRAPPER(VkPipelineLayout)
+////////WRAPPER(VkQueryPool)
+////////WRAPPER(VkRenderPass)
+////////WRAPPER(VkSampler)
+////////WRAPPER(VkSemaphore)
+////////WRAPPER(VkShaderModule)
+////////WRAPPER(VkDebugReportCallbackEXT)
+////////WRAPPER(VkObjectTableNVX)
+////////WRAPPER(VkIndirectCommandsLayoutNVX)
+////////WRAPPER(VkDisplayKHR)
+////////WRAPPER(VkDisplayModeKHR)
+////////WRAPPER(VkSurfaceKHR)
+////////WRAPPER(VkSwapchainKHR)
+////////WRAPPER(VkDescriptorUpdateTemplateKHR)
+////////WRAPPER(VkValidationCacheEXT)
+////////WRAPPER(VkSamplerYcbcrConversionKHR)
+////////WRAPPER(VkDebugUtilsMessengerEXT)
+////////WRAPPER(VkAccelerationStructureNV)
+////////#else   // DISTINCT_NONDISPATCHABLE_HANDLES
+////////WRAPPER(uint64_t)
+////////#endif  // DISTINCT_NONDISPATCHABLE_HANDLES
 
-WRAPPER(VkDevice)
-WRAPPER(VkInstance)
-WRAPPER(VkQueue)
-#ifdef DISTINCT_NONDISPATCHABLE_HANDLES
-WRAPPER(VkBuffer)
-WRAPPER(VkBufferView)
-WRAPPER(VkCommandPool)
-WRAPPER(VkDescriptorPool)
-WRAPPER(VkDescriptorSet)
-WRAPPER(VkDescriptorSetLayout)
-WRAPPER(VkDeviceMemory)
-WRAPPER(VkEvent)
-WRAPPER(VkFence)
-WRAPPER(VkFramebuffer)
-WRAPPER(VkImage)
-WRAPPER(VkImageView)
-WRAPPER(VkPipeline)
-WRAPPER(VkPipelineCache)
-WRAPPER(VkPipelineLayout)
-WRAPPER(VkQueryPool)
-WRAPPER(VkRenderPass)
-WRAPPER(VkSampler)
-WRAPPER(VkSemaphore)
-WRAPPER(VkShaderModule)
-WRAPPER(VkDebugReportCallbackEXT)
-WRAPPER(VkObjectTableNVX)
-WRAPPER(VkIndirectCommandsLayoutNVX)
-WRAPPER(VkDisplayKHR)
-WRAPPER(VkDisplayModeKHR)
-WRAPPER(VkSurfaceKHR)
-WRAPPER(VkSwapchainKHR)
-WRAPPER(VkDescriptorUpdateTemplateKHR)
-WRAPPER(VkValidationCacheEXT)
-WRAPPER(VkSamplerYcbcrConversionKHR)
-WRAPPER(VkDebugUtilsMessengerEXT)
-WRAPPER(VkAccelerationStructureNV)
-#else   // DISTINCT_NONDISPATCHABLE_HANDLES
-WRAPPER(uint64_t)
-#endif  // DISTINCT_NONDISPATCHABLE_HANDLES
 
-static std::unordered_map<void *, layer_data *> layer_data_map;
-static std::mutex command_pool_lock;
-static std::unordered_map<VkCommandBuffer, VkCommandPool> command_pool_map;
-
-// VkCommandBuffer needs check for implicit use of command pool
-static void startWriteObject(struct layer_data *my_data, VkCommandBuffer object, bool lockPool = true) {
-    if (lockPool) {
-        std::unique_lock<std::mutex> lock(command_pool_lock);
-        VkCommandPool pool = command_pool_map[object];
-        lock.unlock();
-        startWriteObject(my_data, pool);
-    }
-    my_data->c_VkCommandBuffer.startWrite(my_data->report_data, object);
-}
-static void finishWriteObject(struct layer_data *my_data, VkCommandBuffer object, bool lockPool = true) {
-    my_data->c_VkCommandBuffer.finishWrite(object);
-    if (lockPool) {
-        std::unique_lock<std::mutex> lock(command_pool_lock);
-        VkCommandPool pool = command_pool_map[object];
-        lock.unlock();
-        finishWriteObject(my_data, pool);
-    }
-}
-static void startReadObject(struct layer_data *my_data, VkCommandBuffer object) {
-    std::unique_lock<std::mutex> lock(command_pool_lock);
-    VkCommandPool pool = command_pool_map[object];
-    lock.unlock();
-    // We set up a read guard against the "Contents" counter to catch conflict vs. vkResetCommandPool and vkDestroyCommandPool
-    // while *not* establishing a read guard against the command pool counter itself to avoid false postives for
-    // non-externally sync'd command buffers
-    my_data->c_VkCommandPoolContents.startRead(my_data->report_data, pool);
-    my_data->c_VkCommandBuffer.startRead(my_data->report_data, object);
-}
-static void finishReadObject(struct layer_data *my_data, VkCommandBuffer object) {
-    my_data->c_VkCommandBuffer.finishRead(object);
-    std::unique_lock<std::mutex> lock(command_pool_lock);
-    VkCommandPool pool = command_pool_map[object];
-    lock.unlock();
-    my_data->c_VkCommandPoolContents.finishRead(pool);
-}
 #endif  // THREADING_H

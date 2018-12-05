@@ -141,101 +141,88 @@ class ThreadOutputGenerator(OutputGenerator):
  */"""
 
     inline_custom_source_preamble = """
-bool ThreadSafety::PreCallRecordAllocateCommandBuffers(VkDevice device, const VkCommandBufferAllocateInfo *pAllocateInfo,
+void ThreadSafety::PreCallRecordAllocateCommandBuffers(VkDevice device, const VkCommandBufferAllocateInfo *pAllocateInfo,
                                                        VkCommandBuffer *pCommandBuffers) {
-    startRead(device);
-    startWrite(pAllocateInfo->commandPool);
-    return false;
+    StartRead(device);
+    StartWrite(pAllocateInfo->commandPool);
 }
 
-bool ThreadSafety::PostCallRecordAllocateCommandBuffers(VkDevice device, const VkCommandBufferAllocateInfo *pAllocateInfo,
+void ThreadSafety::PostCallRecordAllocateCommandBuffers(VkDevice device, const VkCommandBufferAllocateInfo *pAllocateInfo,
                                                         VkCommandBuffer *pCommandBuffers) {
-    finishRead(device);
-    finishWrite(pAllocateInfo->commandPool);
+    FinishRead(device);
+    FinishWrite(pAllocateInfo->commandPool);
 
     // Record mapping from command buffer to command pool
     for (uint32_t index = 0; index < pAllocateInfo->commandBufferCount; index++) {
         std::lock_guard<std::mutex> lock(command_pool_lock);
         command_pool_map[pCommandBuffers[index]] = pAllocateInfo->commandPool;
     }
-    return false;
 }
 
-bool ThreadSafety::PreCallRecordAllocateDescriptorSets(VkDevice device, const VkDescriptorSetAllocateInfo *pAllocateInfo,
+void ThreadSafety::PreCallRecordAllocateDescriptorSets(VkDevice device, const VkDescriptorSetAllocateInfo *pAllocateInfo,
                                                        VkDescriptorSet *pDescriptorSets) {
-    startRead(device);
-    startWrite(pAllocateInfo->descriptorPool);
+    StartRead(device);
+    StartWrite(pAllocateInfo->descriptorPool);
     // Host access to pAllocateInfo::descriptorPool must be externally synchronized
-    result = pTable->AllocateDescriptorSets(device, pAllocateInfo, pDescriptorSets);
-    finishRead(device);
-    finishWrite(pAllocateInfo->descriptorPool);
-    // Host access to pAllocateInfo::descriptorPool must be externally synchronized
-    return result;
 }
 
-bool ThreadSafety::PostCallRecordAllocateDescriptorSets(VkDevice device, const VkDescriptorSetAllocateInfo *pAllocateInfo,
+void ThreadSafety::PostCallRecordAllocateDescriptorSets(VkDevice device, const VkDescriptorSetAllocateInfo *pAllocateInfo,
                                                         VkDescriptorSet *pDescriptorSets) {
-    finishRead(device);
-    finishWrite(pAllocateInfo->descriptorPool);
+    FinishRead(device);
+    FinishWrite(pAllocateInfo->descriptorPool);
     // Host access to pAllocateInfo::descriptorPool must be externally synchronized
-    return false;
 }
 
-bool ThreadSafety::PreCallRecordFreeCommandBuffers(VkDevice device, VkCommandPool commandPool, uint32_t commandBufferCount,
+void ThreadSafety::PreCallRecordFreeCommandBuffers(VkDevice device, VkCommandPool commandPool, uint32_t commandBufferCount,
                                                    const VkCommandBuffer *pCommandBuffers) {
     const bool lockCommandPool = false;  // pool is already directly locked
-    startRead(device);
-    startWrite(commandPool);
+    StartRead(device);
+    StartWrite(commandPool);
     for (uint32_t index = 0; index < commandBufferCount; index++) {
-        startWrite(pCommandBuffers[index], lockCommandPool);
+        StartWrite(pCommandBuffers[index], lockCommandPool);
     }
     // The driver may immediately reuse command buffers in another thread.
     // These updates need to be done before calling down to the driver.
     for (uint32_t index = 0; index < commandBufferCount; index++) {
-        finishWrite(pCommandBuffers[index], lockCommandPool);
+        FinishWrite(pCommandBuffers[index], lockCommandPool);
         std::lock_guard<std::mutex> lock(command_pool_lock);
         command_pool_map.erase(pCommandBuffers[index]);
     }
-    return false;
 }
 
-bool ThreadSafety::PostCallRecordFreeCommandBuffers(VkDevice device, VkCommandPool commandPool, uint32_t commandBufferCount,
+void ThreadSafety::PostCallRecordFreeCommandBuffers(VkDevice device, VkCommandPool commandPool, uint32_t commandBufferCount,
                                                     const VkCommandBuffer *pCommandBuffers) {
-    finishRead(device);
-    finishWrite(commandPool);
+    FinishRead(device);
+    FinishWrite(commandPool);
 }
 
-bool ThreadSafety::PreCallRecordResetCommandPool(VkDevice device, VkCommandPool commandPool, VkCommandPoolResetFlags flags) {
-    startRead(device);
-    startWrite(commandPool);
+void ThreadSafety::PreCallRecordResetCommandPool(VkDevice device, VkCommandPool commandPool, VkCommandPoolResetFlags flags) {
+    StartRead(device);
+    StartWrite(commandPool);
     // Check for any uses of non-externally sync'd command buffers (for example from vkCmdExecuteCommands)
-    my_data->c_VkCommandPoolContents.startWrite(my_data->report_data, commandPool);
+    c_VkCommandPoolContents.StartWrite(commandPool);
     // Host access to commandPool must be externally synchronized
-    return false;
 }
 
-bool ThreadSafety::PostCallRecordResetCommandPool(VkDevice device, VkCommandPool commandPool, VkCommandPoolResetFlags flags) {
-    finishRead(device);
-    finishWrite(commandPool);
-    c_VkCommandPoolContents.finishWrite(commandPool);
+void ThreadSafety::PostCallRecordResetCommandPool(VkDevice device, VkCommandPool commandPool, VkCommandPoolResetFlags flags) {
+    FinishRead(device);
+    FinishWrite(commandPool);
+    c_VkCommandPoolContents.FinishWrite(commandPool);
     // Host access to commandPool must be externally synchronized
-    return false;
 }
 
-bool ThreadSafety::PreCallRecordDestroyCommandPool(VkDevice device, VkCommandPool commandPool, const VkAllocationCallbacks *pAllocator) {
-    startRead(device);
-    startWrite(commandPool);
+void ThreadSafety::PreCallRecordDestroyCommandPool(VkDevice device, VkCommandPool commandPool, const VkAllocationCallbacks *pAllocator) {
+    StartRead(device);
+    StartWrite(commandPool);
     // Check for any uses of non-externally sync'd command buffers (for example from vkCmdExecuteCommands)
-    my_data->c_VkCommandPoolContents.startWrite(my_data->report_data, commandPool);
+    c_VkCommandPoolContents.StartWrite(commandPool);
     // Host access to commandPool must be externally synchronized
-    return false;
 }
 
-bool ThreadSafety::PostCallRecordDestroyCommandPool(VkDevice device, VkCommandPool commandPool, const VkAllocationCallbacks *pAllocator) {
-    finishRead(device);
-    finishWrite(commandPool);
-    c_VkCommandPoolContents.finishWrite(commandPool);
-    return false;
+void ThreadSafety::PostCallRecordDestroyCommandPool(VkDevice device, VkCommandPool commandPool, const VkAllocationCallbacks *pAllocator) {
+    FinishRead(device);
+    FinishWrite(commandPool);
+    c_VkCommandPoolContents.FinishWrite(commandPool);
 }
 
 """
@@ -394,6 +381,12 @@ bool ThreadSafety::PostCallRecordDestroyCommandPool(VkDevice device, VkCommandPo
             print("Error: Output Filenames have changed, update generator source.\n")
             sys.exit(1)
 
+        if self.source_file:
+            write('#include "chassis.h"', file=self.outFile)
+            write('#include "thread_safety_validation.h"', file=self.outFile)
+            self.newline()
+            write(self.inline_custom_source_preamble, file=self.outFile)
+
     def endFile(self):
         # Finish processing in superclass
         OutputGenerator.endFile(self)
@@ -493,6 +486,7 @@ bool ThreadSafety::PostCallRecordDestroyCommandPool(VkDevice device, VkCommandPo
         if "QueuePresentKHR" in name or (("DebugMarker" in name or "DebugUtilsObject" in name) and "EXT" in name):
             self.appendSection('command', '// TODO - not wrapping EXT function ' + name)
             return
+
         # Determine first if this function needs to be intercepted
         startthreadsafety = self.makeThreadUseBlock(cmdinfo.elem, 'Start')
         if startthreadsafety is None:
@@ -500,42 +494,23 @@ bool ThreadSafety::PostCallRecordDestroyCommandPool(VkDevice device, VkCommandPo
         finishthreadsafety = self.makeThreadUseBlock(cmdinfo.elem, 'Finish')
 
         OutputGenerator.genCmd(self, cmdinfo, name, alias)
-        #
-        decls = self.makeCDecls(cmdinfo.elem)
 
         # setup common to call wrappers
         # first parameter is always dispatchable
         dispatchable_type = cmdinfo.elem.find('param/type').text
         dispatchable_name = cmdinfo.elem.find('param/name').text
-        # self.appendSection('command', '    dispatch_key key = get_dispatch_key('+dispatchable_name+');')
-        # self.appendSection('command', '    layer_data *my_data = GetLayerDataPtr(key, layer_data_map);')
-        #if dispatchable_type in ["VkPhysicalDevice", "VkInstance"]:
-        #    self.appendSection('command', '    VkLayerInstanceDispatchTable *pTable = my_data->instance_dispatch_table;')
-        #else:
-        #    self.appendSection('command', '    VkLayerDispatchTable *pTable = my_data->device_dispatch_table;')
-        # Declare result variable, if any.
-        #resulttype = cmdinfo.elem.find('proto/type')
-        #if (resulttype is not None and resulttype.text == 'void'):
-        #  resulttype = None
-        #if (resulttype is not None):
-        #    self.appendSection('command', '    ' + resulttype.text + ' result;')
-        #    assignresult = 'result = '
-        #else:
-        #    assignresult = ''
+
+        decls = self.makeCDecls(cmdinfo.elem)
 
         if self.source_file:
-
-            self.appendSection('command', self.inline_custom_source_preamble)
-
             pre_decl = decls[0][:-1]
             pre_decl = pre_decl.split("VKAPI_CALL ")[1]
-            pre_decl = 'bool ThreadSafety::PreCallRecord' + pre_decl + ' {'
+            pre_decl = 'void ThreadSafety::PreCallRecord' + pre_decl + ' {'
 
             # PreCallRecord
             self.appendSection('command', '')
             self.appendSection('command', pre_decl)
             self.appendSection('command', "    " + "\n    ".join(str(startthreadsafety).rstrip().split("\n")))
-            self.appendSection('command', '    return false;')
             self.appendSection('command', '}')
 
             post_decl = pre_decl.replace('PreCallRecord', 'PostCallRecord')
@@ -544,13 +519,12 @@ bool ThreadSafety::PostCallRecordDestroyCommandPool(VkDevice device, VkCommandPo
             self.appendSection('command', '')
             self.appendSection('command', post_decl)
             self.appendSection('command', "    " + "\n    ".join(str(finishthreadsafety).rstrip().split("\n")))
-            self.appendSection('command', '    return false;')
             self.appendSection('command', '}')
 
         if self.header_file:
             pre_decl = decls[0][:-1]
             pre_decl = pre_decl.split("VKAPI_CALL ")[1]
-            pre_decl = 'bool PreCallRecord' + pre_decl + ';'
+            pre_decl = 'void PreCallRecord' + pre_decl + ';'
 
             # PreCallRecord
             self.appendSection('command', '')

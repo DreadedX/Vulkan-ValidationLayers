@@ -312,7 +312,8 @@ const bool wrap_handles = false;
 #if BUILD_OBJECT_TRACKER
 #include "object_lifetime_validation.h"
 #define OBJECT_LAYER_NAME "VK_LAYER_LUNARG_object_tracker"
-#elif BUILD_THREAD_CHECKER
+#elif BUILD_THREAD_SAFETY
+#include "thread_safety_validation.h"
 #define OBJECT_LAYER_NAME "VK_LAYER_GOOGLE_threading"
 #elif BUILD_PARAMETER_VALIDATION
 #define OBJECT_LAYER_NAME "VK_LAYER_LUNARG_parameter_validation"
@@ -435,6 +436,10 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo *pCreat
     auto object_tracker = new ObjectLifetimes;
     local_object_dispatch.emplace_back(object_tracker);
     object_tracker->container_type = LayerObjectTypeObjectTracker;
+#elif BUILD_THREAD_SAFETY
+    auto thread_checker = new ThreadSafety;
+    local_object_dispatch.emplace_back(thread_checker);
+    thread_checker->container_type = LayerObjectTypeThreading;
 #endif
 
 
@@ -461,6 +466,8 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo *pCreat
         (pCreateInfo->pApplicationInfo ? pCreateInfo->pApplicationInfo->apiVersion : VK_API_VERSION_1_0), pCreateInfo);
 #if BUILD_OBJECT_TRACKER
     layer_debug_messenger_actions(framework->report_data, framework->logging_messenger, pAllocator, "lunarg_object_tracker");
+#elif BUILD_THREAD_SAFETY
+    layer_debug_messenger_actions(framework->report_data, framework->logging_messenger, pAllocator, "google_thread_checker");
 #else
     layer_debug_messenger_actions(framework->report_data, framework->logging_messenger, pAllocator, "lunarg_unique_objects");
 #endif
@@ -555,6 +562,15 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice gpu, const VkDevice
     object_tracker->report_data = device_interceptor->report_data;
     object_tracker->device_dispatch_table = device_interceptor->device_dispatch_table;
     device_interceptor->object_dispatch.emplace_back(object_tracker);
+#elif BUILD_THREAD_SAFETY
+    auto thread_safety = new ThreadSafety;
+    // TODO:  Initialize child objects with parent info thru constuctor taking a parent object
+    thread_safety->container_type = LayerObjectTypeThreading;
+    thread_safety->physical_device = gpu;
+    thread_safety->instance = instance_interceptor->instance;
+    thread_safety->report_data = device_interceptor->report_data;
+    thread_safety->device_dispatch_table = device_interceptor->device_dispatch_table;
+    device_interceptor->object_dispatch.emplace_back(thread_safety);
 #endif
 
     for (auto intercept : instance_interceptor->object_dispatch) {
