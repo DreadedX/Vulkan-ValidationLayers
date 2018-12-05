@@ -484,7 +484,7 @@ void ThreadSafety::PostCallRecordDestroyCommandPool(VkDevice device, VkCommandPo
             'vkAllocateDescriptorSets',
             'vkQueuePresentKHR',
         ]
-        if name in special_functions and self.source_file:
+        if name == 'vkQueuePresentKHR' or (name in special_functions and self.source_file):
             return
 
         if (("DebugMarker" in name or "DebugUtilsObject" in name) and "EXT" in name):
