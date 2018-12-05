@@ -143,14 +143,14 @@ class ThreadOutputGenerator(OutputGenerator):
     inline_custom_source_preamble = """
 void ThreadSafety::PreCallRecordAllocateCommandBuffers(VkDevice device, const VkCommandBufferAllocateInfo *pAllocateInfo,
                                                        VkCommandBuffer *pCommandBuffers) {
-    StartRead(device);
-    StartWrite(pAllocateInfo->commandPool);
+    StartReadObject(device);
+    StartWriteObject(pAllocateInfo->commandPool);
 }
 
 void ThreadSafety::PostCallRecordAllocateCommandBuffers(VkDevice device, const VkCommandBufferAllocateInfo *pAllocateInfo,
                                                         VkCommandBuffer *pCommandBuffers) {
-    FinishRead(device);
-    FinishWrite(pAllocateInfo->commandPool);
+    FinishReadObject(device);
+    FinishWriteObject(pAllocateInfo->commandPool);
 
     // Record mapping from command buffer to command pool
     for (uint32_t index = 0; index < pAllocateInfo->commandBufferCount; index++) {
@@ -161,30 +161,30 @@ void ThreadSafety::PostCallRecordAllocateCommandBuffers(VkDevice device, const V
 
 void ThreadSafety::PreCallRecordAllocateDescriptorSets(VkDevice device, const VkDescriptorSetAllocateInfo *pAllocateInfo,
                                                        VkDescriptorSet *pDescriptorSets) {
-    StartRead(device);
-    StartWrite(pAllocateInfo->descriptorPool);
+    StartReadObject(device);
+    StartWriteObject(pAllocateInfo->descriptorPool);
     // Host access to pAllocateInfo::descriptorPool must be externally synchronized
 }
 
 void ThreadSafety::PostCallRecordAllocateDescriptorSets(VkDevice device, const VkDescriptorSetAllocateInfo *pAllocateInfo,
                                                         VkDescriptorSet *pDescriptorSets) {
-    FinishRead(device);
-    FinishWrite(pAllocateInfo->descriptorPool);
+    FinishReadObject(device);
+    FinishWriteObject(pAllocateInfo->descriptorPool);
     // Host access to pAllocateInfo::descriptorPool must be externally synchronized
 }
 
 void ThreadSafety::PreCallRecordFreeCommandBuffers(VkDevice device, VkCommandPool commandPool, uint32_t commandBufferCount,
                                                    const VkCommandBuffer *pCommandBuffers) {
     const bool lockCommandPool = false;  // pool is already directly locked
-    StartRead(device);
-    StartWrite(commandPool);
+    StartReadObject(device);
+    StartWriteObject(commandPool);
     for (uint32_t index = 0; index < commandBufferCount; index++) {
-        StartWrite(pCommandBuffers[index], lockCommandPool);
+        StartWriteObject(pCommandBuffers[index], lockCommandPool);
     }
     // The driver may immediately reuse command buffers in another thread.
     // These updates need to be done before calling down to the driver.
     for (uint32_t index = 0; index < commandBufferCount; index++) {
-        FinishWrite(pCommandBuffers[index], lockCommandPool);
+        FinishWriteObject(pCommandBuffers[index], lockCommandPool);
         std::lock_guard<std::mutex> lock(command_pool_lock);
         command_pool_map.erase(pCommandBuffers[index]);
     }
@@ -192,36 +192,36 @@ void ThreadSafety::PreCallRecordFreeCommandBuffers(VkDevice device, VkCommandPoo
 
 void ThreadSafety::PostCallRecordFreeCommandBuffers(VkDevice device, VkCommandPool commandPool, uint32_t commandBufferCount,
                                                     const VkCommandBuffer *pCommandBuffers) {
-    FinishRead(device);
-    FinishWrite(commandPool);
+    FinishReadObject(device);
+    FinishWriteObject(commandPool);
 }
 
 void ThreadSafety::PreCallRecordResetCommandPool(VkDevice device, VkCommandPool commandPool, VkCommandPoolResetFlags flags) {
-    StartRead(device);
-    StartWrite(commandPool);
+    StartReadObject(device);
+    StartWriteObject(commandPool);
     // Check for any uses of non-externally sync'd command buffers (for example from vkCmdExecuteCommands)
     c_VkCommandPoolContents.StartWrite(commandPool);
     // Host access to commandPool must be externally synchronized
 }
 
 void ThreadSafety::PostCallRecordResetCommandPool(VkDevice device, VkCommandPool commandPool, VkCommandPoolResetFlags flags) {
-    FinishRead(device);
-    FinishWrite(commandPool);
+    FinishReadObject(device);
+    FinishWriteObject(commandPool);
     c_VkCommandPoolContents.FinishWrite(commandPool);
     // Host access to commandPool must be externally synchronized
 }
 
 void ThreadSafety::PreCallRecordDestroyCommandPool(VkDevice device, VkCommandPool commandPool, const VkAllocationCallbacks *pAllocator) {
-    StartRead(device);
-    StartWrite(commandPool);
+    StartReadObject(device);
+    StartWriteObject(commandPool);
     // Check for any uses of non-externally sync'd command buffers (for example from vkCmdExecuteCommands)
     c_VkCommandPoolContents.StartWrite(commandPool);
     // Host access to commandPool must be externally synchronized
 }
 
 void ThreadSafety::PostCallRecordDestroyCommandPool(VkDevice device, VkCommandPool commandPool, const VkAllocationCallbacks *pAllocator) {
-    FinishRead(device);
-    FinishWrite(commandPool);
+    FinishReadObject(device);
+    FinishWriteObject(commandPool);
     c_VkCommandPoolContents.FinishWrite(commandPool);
 }
 
@@ -282,10 +282,10 @@ void ThreadSafety::PostCallRecordDestroyCommandPool(VkDevice device, VkCommandPo
                 if externsync == 'true':
                     if self.paramIsArray(param):
                         paramdecl += 'for (uint32_t index=0;index<' + param.attrib.get('len') + ';index++) {\n'
-                        paramdecl += '    ' + functionprefix + 'Write(' + paramname.text + '[index]);\n'
+                        paramdecl += '    ' + functionprefix + 'WriteObject(' + paramname.text + '[index]);\n'
                         paramdecl += '}\n'
                     else:
-                        paramdecl += functionprefix + 'Write(' + paramname.text + ');\n'
+                        paramdecl += functionprefix + 'WriteObject(' + paramname.text + ');\n'
                 elif (param.attrib.get('externsync')):
                     if self.paramIsArray(param):
                         # Externsync can list pointers to arrays of members to synchronize
@@ -306,14 +306,14 @@ void ThreadSafety::PostCallRecordDestroyCommandPool(VkDevice device, VkCommandPo
                                 paramdecl += '    for(uint32_t index2=0;index2<'+limit+';index2++)\n'
                                 element = element.replace('[]','[index2]')
                                 second_indent = '   '
-                            paramdecl += '    ' + second_indent + functionprefix + 'Write(' + element + ');\n'
+                            paramdecl += '    ' + second_indent + functionprefix + 'WriteObject(' + element + ');\n'
                         paramdecl += '}\n'
                     else:
                         # externsync can list members to synchronize
                         for member in externsync.split(","):
                             member = str(member).replace("::", "->")
                             member = str(member).replace(".", "->")
-                            paramdecl += '    ' + functionprefix + 'Write(' + member + ');\n'
+                            paramdecl += '    ' + functionprefix + 'WriteObject(' + member + ');\n'
                 else:
                     paramtype = param.find('type')
                     if paramtype is not None:
@@ -330,12 +330,12 @@ void ThreadSafety::PostCallRecordDestroyCommandPool(VkDevice device, VkCommandPo
                                         dereference = '*'
                             param_len = str(param.attrib.get('len')).replace("::", "->")
                             paramdecl += 'for (uint32_t index = 0; index < ' + dereference + param_len + '; index++) {\n'
-                            paramdecl += '    ' + functionprefix + 'Read(' + paramname.text + '[index]);\n'
+                            paramdecl += '    ' + functionprefix + 'ReadObject(' + paramname.text + '[index]);\n'
                             paramdecl += '}\n'
                         elif not self.paramIsPointer(param):
                             # Pointer params are often being created.
                             # They are not being read from.
-                            paramdecl += functionprefix + 'Read(' + paramname.text + ');\n'
+                            paramdecl += functionprefix + 'ReadObject(' + paramname.text + ');\n'
         explicitexternsyncparams = cmd.findall("param[@externsync]")
         if (explicitexternsyncparams is not None):
             for param in explicitexternsyncparams:
@@ -482,8 +482,12 @@ void ThreadSafety::PostCallRecordDestroyCommandPool(VkDevice device, VkCommandPo
             'vkResetCommandPool',
             'vkDestroyCommandPool',
             'vkAllocateDescriptorSets',
+            'vkQueuePresentKHR',
         ]
-        if "QueuePresentKHR" in name or (("DebugMarker" in name or "DebugUtilsObject" in name) and "EXT" in name):
+        if name in special_functions and self.source_file:
+            return
+
+        if (("DebugMarker" in name or "DebugUtilsObject" in name) and "EXT" in name):
             self.appendSection('command', '// TODO - not wrapping EXT function ' + name)
             return
 
